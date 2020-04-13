@@ -1,91 +1,129 @@
-import math   # for mathematical operations
-import imageio
+import argparse
 import os
-import matplotlib.pyplot as plt    # for plotting the images
-from sklearn.model_selection import train_test_split
-from tensorflow.keras.preprocessing.image import img_to_array
-from tensorflow.keras import layers
-from tensorflow.keras import Sequential
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from sklearn.preprocessing import MultiLabelBinarizer
 import pickle
-from keras.preprocessing import image   # for preprocessing the images
-import numpy as np    # for mathematical operations
-from keras.utils import np_utils
-from skimage.transform import resize   # for resizing images
+import random
+import imageio
+import numpy as np
+import matplotlib.pyplot as plt
 from imutils import paths
+from skimage.transform import resize
+from keras import Sequential, Model, Input
+from keras.utils.np_utils import to_categorical
+from keras.layers import Dense, Dropout, LSTM, Reshape
+from keras.applications.vgg16 import VGG16
+from keras_preprocessing.image import img_to_array
+from keras.applications.vgg16 import preprocess_input
+from sklearn.metrics import classification_report
+from sklearn.model_selection import train_test_split
 
-FRAMES_FOLDER_PATH = "data\\frames\\"
-VIDEOS_FOLDER_PATH = "data\\videos\\"
+# Construct the argument parser and parse the arguments
+ap = argparse.ArgumentParser()
+ap.add_argument("-d", "--dataset", required=False, default="dataset\\videos\\", help="path to input dataset")
+ap.add_argument("-e", "--epoch", required=False, default=15, help="number of epochs")
+ap.add_argument("-m", "--model", required=False, default="model", help="name of output model")
+ap.add_argument("-r", "--resize", required=False, default=96, help="frame resize number")
+ap.add_argument("-b", "--batch_size", required=False, default=32, help="batch size")
+ap.add_argument("-f", "--from_file", required=False, action='store_true', help="get data from files")
+ap.add_argument("-df", "--data_file_name", required=False, default="data", help="name of data file")
+ap.add_argument("-lf", "--labels_file_name", required=False, default="labels", help="name of label file")
+ap.add_argument("-fs", "--frame_per_second", required=False, default=1, help="frame/second")
+args = vars(ap.parse_args())
 
-RESIZE = 128
-EPOCHS = 2
-BS = 1
+VIDEOS_FOLDER_PATH = args["dataset"]
+MODEL_NAME = args["model"]
+FROM_FILE = args["from_file"]
+DATA_FILE_NAME = "data\\" + args["data_file_name"]
+LABELS_FILE_NAME = "data\\" + args["labels_file_name"]
 
-# Grab the videos paths and randomly shuffle them
-video_paths = sorted(list(paths.list_files(VIDEOS_FOLDER_PATH)))
+RESIZE = int(args["resize"])
+EPOCHS = int(args["epoch"])
+BS = int(args["batch_size"])
+NO_FRAMES = int(args["frame_per_second"])
+IMG_DEPTH = 3
+NO_CLASSES = 2
 
-# Initialize the data and labels
-data = []
-labels = []
+if not FROM_FILE:
+    # Get all video paths and shuffle them randomly
+    video_paths = sorted(list(paths.list_files(VIDEOS_FOLDER_PATH)))
 
-for video_path in video_paths:
-    # capturing the video from the given path
-    reader = imageio.get_reader(video_path)
+    random.seed()
+    random.shuffle(video_paths)
 
-    FRAME_RATE = math.floor(reader.get_meta_data()["fps"])
-    DURATION = reader.get_meta_data()["duration"]
+    # Initialize the data and labels
+    data = []
+    labels = []
+    labels_text = []
+    for video_path in video_paths:
+        # capturing the video from the given path
+        reader = imageio.get_reader(video_path)
 
-    frames = []
-    frames_labels = []
-    for frame_id, im in enumerate(reader):
-        if frame_id % FRAME_RATE == 0:
-            frame = im.copy()
-            frame = resize(frame, (RESIZE, RESIZE))
-            frame = img_to_array(frame)
+        FRAME_RATE = int(reader.get_meta_data()["fps"])
 
-            label = video_path.split(os.path.sep)[-2]
+        for frame_id, im in enumerate(reader):
+            # Get n frames per second
+            if frame_id % (FRAME_RATE // NO_FRAMES) == 0:
+                frame = im.copy()
+                frame = resize(frame, (RESIZE, RESIZE))
+                frame = img_to_array(frame)
 
-            data.append(frame)
-            labels.append(label)
+                label_text = video_path.split(os.path.sep)[-2]
 
-    print("Path:", video_path, "| Label:", label)
+                data.append(frame)
+                labels.append(int(label_text == "Violence"))
+                labels_text.append(label_text)
+            if frame_id > FRAME_RATE*6:
+                break
 
-data = np.array(data, dtype="float") / 255.0
-labels = np.array(labels)
+        print("Path:", video_path, "| Label:", label_text)
 
-mlb = MultiLabelBinarizer()
-labels = mlb.fit_transform(labels)
+    data = np.array(data).astype(int)
+    labels = to_categorical(labels)
 
-f = open("model" + ".lbl", "wb")
-f.write((pickle.dumps(mlb)))
+    data = preprocess_input(data, mode='tf')
 
-no_classes = len(mlb.classes_)
+    with open(DATA_FILE_NAME + ".txt", 'wb') as file:
+        pickle.dump(data, file)
+    with open(LABELS_FILE_NAME + ".txt", 'wb') as file:
+        pickle.dump(labels, file)
+else:
+    with open(DATA_FILE_NAME + ".txt", 'rb') as file:
+        data = pickle.load(file)
+    with open(LABELS_FILE_NAME + ".txt", 'rb') as file:
+        labels = pickle.load(file)
 
-(train_data, valid_data, train_labels, valid_labels) = train_test_split(data, labels, test_size=0.25)
+# Split to train and validation data
+(train_data, valid_data, train_labels, valid_labels) = train_test_split(data, labels, random_state=42, test_size=0.25)
 
-print(train_data.shape)
-print(valid_data.shape)
-print(train_labels.shape)
-print(valid_labels.shape)
+print("---Prepare VGG16 model---")
+base_model = VGG16(weights="imagenet", include_top=False, input_shape=(RESIZE, RESIZE, IMG_DEPTH))
 
-aug = ImageDataGenerator(rotation_range=30, width_shift_range=0.1, height_shift_range=0.1, zoom_range=0.2,
-                         horizontal_flip=True)
+# Disable first top 10 layers
+for layer in base_model.layers[:10]:
+    layer.trainable = False
 
-# Initialize the model
-model = Sequential()
-model.add(layers.Embedding(1000, 64))
-model.add(layers.LSTM(128))
-model.add(layers.Dense(10, activation='softmax'))
+print("---Create LSTM model---")
+model = base_model.get_layer("block5_pool").output
+model = Reshape(target_shape=(3*3, 512))(model)
+model = LSTM(256, return_sequences=True)(model)
+model = LSTM(256)(model)
+model = Dropout(0.5)(model)
+model = Dense(NO_CLASSES, activation='softmax')(model)
+
+# Connect VGG16 and LSTM model
+model = Model(base_model.input, model)
 model.summary()
 
-model.compile(loss='binary_crossentropy', optimizer="adam", metrics=['accuracy'])
+model.compile(loss='binary_crossentropy', optimizer="sgd", metrics=['accuracy'])
 
-# Train the network
-H = model.fit(aug.flow(train_data, train_labels, batch_size=BS), validation_data=(valid_data, valid_labels), epochs=EPOCHS, verbose=1)
+print("---Fit generator---")
+H = model.fit(train_data, train_labels, batch_size=BS, epochs=EPOCHS, validation_data=(valid_data, valid_labels))
+
+print("---Evaluate the network---")
+predictions = model.predict(train_data, batch_size=BS)
+print(classification_report(train_labels.argmax(axis=1), predictions.argmax(axis=1), target_names=["V", "NV"]))
 
 # Save model to disk
-model.save("model" + ".h5")
+model.save("models\\" + MODEL_NAME + ".h5")
 
 # Plot the training loss and accuracy
 plt.style.use("ggplot")
@@ -98,6 +136,4 @@ plt.title("Training Loss and Accuracy")
 plt.xlabel("Epoch #")
 plt.ylabel("Loss/Accuracy")
 plt.legend(loc="upper right")
-plt.savefig("model" + ".png")
-
-print("Done!")
+plt.savefig("plots\\" + MODEL_NAME + ".png")
