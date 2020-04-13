@@ -13,8 +13,8 @@ Labels:
 </p>
 
 ## Progress so far
-* Implement pretrained VGG16 and LSTM on top
-* Implement prediction model (frame by frame)
+* Implemented pretrained VGG16 and LSTM on top
+* Implemented prediction model (frame by frame)
 
 ### NEXT TO DO
 * Add optical flow
