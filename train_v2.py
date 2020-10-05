@@ -26,7 +26,7 @@ ap.add_argument("-b", "--batch_size", required=False, default=32, help="batch si
 ap.add_argument("-f", "--from_file", required=False, action='store_true', help="get data from files")
 ap.add_argument("-df", "--data_file_name", required=False, default="data", help="name of data file")
 ap.add_argument("-lf", "--labels_file_name", required=False, default="labels", help="name of label file")
-ap.add_argument("-fs", "--frame_per_second", required=False, default=1, help="frame/second")
+ap.add_argument("-fs", "--frame_per_second", required=False, default=2, help="frame/second")
 args = vars(ap.parse_args())
 
 VIDEOS_FOLDER_PATH = args["dataset"]
@@ -53,12 +53,14 @@ if not FROM_FILE:
     data = []
     labels = []
     labels_text = []
-    for video_path in video_paths:
+    for i, video_path in enumerate(video_paths):
         # capturing the video from the given path
         reader = imageio.get_reader(video_path)
 
         FRAME_RATE = int(reader.get_meta_data()["fps"])
 
+        frames = []
+        frames_labels = []
         for frame_id, im in enumerate(reader):
             # Get n frames per second
             if frame_id % (FRAME_RATE // NO_FRAMES) == 0:
@@ -68,17 +70,18 @@ if not FROM_FILE:
 
                 label_text = video_path.split(os.path.sep)[-2]
 
-                data.append(frame)
-                labels.append(int(label_text == "Violence"))
-                labels_text.append(label_text)
-            if frame_id > FRAME_RATE*6:
+                frames.append(frame)
+                frames_labels.append(int(label_text == "Violence"))
+            if frame_id > FRAME_RATE*2:
                 break
 
-        print("Path:", video_path, "| Label:", label_text)
+        print("Path:", video_path, "| Label:", label_text, "| Num:", i)
 
-    data = np.array(data).astype(int)
-    labels = to_categorical(labels)
+        data.append(frames)
+        labels.append(frames_labels)
 
+    data = np.array(data, dtype="float") / 255.0
+    labels = to_categorical(labels, num_classes=NO_CLASSES)
     data = preprocess_input(data, mode='tf')
 
     with open(DATA_FILE_NAME + ".txt", 'wb') as file:
@@ -91,11 +94,17 @@ else:
     with open(LABELS_FILE_NAME + ".txt", 'rb') as file:
         labels = pickle.load(file)
 
-# Split to train and validation data
-(train_data, valid_data, train_labels, valid_labels) = train_test_split(data, labels, random_state=42, test_size=0.25)
+
+t_num_vid, t_num_fram, t_width, t_height, t_depth = data.shape
+reshape_1d = t_width * t_height
+
+data = data.reshape(t_num_vid, t_num_fram, reshape_1d, t_depth)
+
+data = data/data.max()
+
 
 print("---Prepare VGG16 model---")
-base_model = VGG16(weights="imagenet", include_top=False, input_shape=(RESIZE, RESIZE, IMG_DEPTH))
+base_model = VGG16(weights="imagenet", include_top=False, input_shape=(t_num_fram, reshape_1d, t_depth))
 
 # Disable first top 10 layers
 for layer in base_model.layers[:10]:
@@ -116,11 +125,7 @@ model.summary()
 model.compile(loss='binary_crossentropy', optimizer="sgd", metrics=['accuracy'])
 
 print("---Fit generator---")
-H = model.fit(train_data, train_labels, batch_size=BS, epochs=EPOCHS, validation_data=(valid_data, valid_labels))
-
-print("---Evaluate the network---")
-predictions = model.predict(train_data, batch_size=BS)
-print(classification_report(train_labels.argmax(axis=1), predictions.argmax(axis=1), target_names=["V", "NV"]))
+H = model.fit(data, labels, batch_size=BS, epochs=EPOCHS)
 
 # Save model to disk
 model.save("models\\" + MODEL_NAME + ".h5")
